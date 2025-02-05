@@ -1,0 +1,537 @@
+---
+title: "Echantillonage décisionnel"
+author: "Amasson"
+date: "2025-01-31"
+output: html_document
+---
+
+## Introduction
+
+Parfois, lorsque l'on construit un échantillon, on peut avoir interêt à ce qu'il soit le plus petit possible. 
+
+Afin d'anticiper l'infestation d'une serre par un insecte (e.g. pucerons), il peut être utile d'en estimer la probabilité. Cette estimation repose généralement sur un **échantillon** de plants (e.g. de fraisiers), que l'on examine pour noter la présence ou l'absence de l'insecte. Dans ce contexte le nombre de plants à examiner est d'autant plus grand que la fréquence d'insecte est faible, et les échantillons peuvent de ce fait atteindre des tailles très importantes, nécessitant un examen long et fastidieux.
+
+Dans ce script, on développe une **méthode d'échantillonage décisionnel** permettant de minimiser le nombre de plants examinés en évitant tous les examens de plant superflus.
+
+#### Formulation
+
+*Formulation du modèle*
+
+Plus particulièrement pour chaque lot de plants (i.e. chaque serre), on cherche à determiner si la fréquence de l'insecte dépasse un certain seuil au delà duquel on peut considérer que la serre est infestée. On note $p$ la probabilité de retrouver un insecte sur un plant, et $p*$ le seuil critique à ne pas dépasser (par exemple 1% des plants soit $p* = 0.01$).On suppose que $p$ suit une loi $Beta$ et que $X$ le nombre de plants infestés suit une loi Binomiale de paramètre $p$ et $N$ le nombre total de plants examinés. Ainsi :
+
+$$X \sim Binomial (N, p)$$ avec $$p \sim Beta (\alpha, \beta)$$
+
+*Formulation du test*
+
+On pose **(H)** l'hypothèse : **"la probabilité $p$ de retrouver un insecte sur un plant dépasse le seuil critique $p*$"**
+
+On cherche à tester (H) en fonction des résultats des examens de plants, c'est-à-dire en fonction des observations de $X$. Pour ce faire on se munit d'un seuil de confiance $e$ permettant d'accepter l'hypothèse (H) ($P(H vraie) > 1 - e$), de la rejeter (si $P(H vraie) < e$), ou de rester indécis si les résultats des examens ne permettent pas de prendre une décision fiable (1 - e \> $P(H vraie) > e$).
+
+*Rappel sur la loi Beta*
+
+La loi $Beta$ est une distribution continue définie par deux paramètres, $\alpha$ et $\beta$. Elle est souvent utilisée pour représenter des proportions ou des probabilités. Typiquement lorsque l'on s'interesse à des données distribuées selon une loi binomiale ($X \sim \text{Binomial}(N, p)$), la loi $Beta$ est un choix classique pour représenter la probabilité $p$ pour plusieurs raisons :
+
+-   Elle est définie sur l'intervalle $[0, 1]$
+
+-   La loi beta est la loi conjuguée de la loi binomiale : Dans un contexte bayésien, l'estimation de la posterior d'une variable $p$ suivant une loi Beta de paramètres $\alpha$ et $\beta$ sachant le résultat d'une épreuve de Bernoulli de probabilité $p$ est simple : On ajoute 1 à $\alpha$ si le résultat de l'épreuve est positif, 1 à $\beta$ s'il est négatif. Ainsi les paramètres $\alpha$ et $\beta$ représentent respectivement le nombre de succès et d’échecs à l'issue de $N$ épreuves de Bernoulli de probabilité $p$, ce qui rend la calibration de $p$ à partir d'observations de $X \sim Binomial(N,p)$ simple et intuitive.
+
+#### Calibration et tests séquentiels
+
+Afin d'éviter tout examen superflu, on cherche à calibrer le modèle précédent de façon séquentielle, c'est-à-dire en reestimant la distribution de probabilité de $p$ et en reiterant le test sur (H) à chaque nouvel examen de plant. Le protocole de cette calibration est le suivant :
+
+-   On part avec aucune information a priori sur la distributiuon de $p$, soit $p$ \~ $Beta (1, 1)$
+
+-   A chaque nouvel examen de plant :
+
+    -   On actualise la distribution de $p$, en ajoutant 1 à $\alpha$ si le test est positif, 1 à \$\beta\$ s'il est négatif (voir rappel sur la loi Beta).
+
+    -   On calcule la probabilité que $p$ dépasse le seuil critique $p*$. Si cette probabilité est supérieure à $1 - e$ alors on conclut que **le lot est infesté**, si elle est inférieure à $e$ on conclut que **le lot n'est pas infesté**. Si elle est comprise entre $e$ et $1-e$ enfin, on ne peut pas conclure et un examen supplémentaire est nécessaire.
+
+-   Si l'on atteint le nombre de plants dans le lot, on conclut sur une **indécision.**
+
+## Simulation des données
+
+On simule le travail d'un technicien qui examine 10 lots de tailles allant de 5 à 100 plants. Sur chacun des plants, la probabilité de trouver un insecte est de 0.05 pour les pucerons, de 0.03 pour les aleurodes et de 0.1 pour les thrips.
+
+```{r}
+# Chargement des packages nécessaires
+library(ggplot2)
+library(dplyr)
+
+# Définition des paramètres
+set.seed(129)  # Pour la reproductibilité
+nb_lots <- 10  # Nombre de lots
+lot_sizes <- sample(5:100, nb_lots, replace = TRUE)  # Taille de chaque lot
+
+# Fixation des probabilités pour chaque insecte (identiques pour tous les lots)
+proportions <- c(Pucerons = 0.05, Thrips = 0.10, Aleurodes = 0.03)
+
+# Création du dataset sans probabilités spécifiques au lot
+dataset_examen_plants <- do.call(rbind, lapply(1:nb_lots, function(lot) {
+  lot_size <- lot_sizes[lot]
+  data.frame(
+    Lot_ID = lot,
+    Lot_Size = lot_size, 
+    Plant_ID = 1:lot_size,
+    Pucerons = rbinom(lot_size, 1, proportions["Pucerons"]),
+    Thrips = rbinom(lot_size, 1, proportions["Thrips"]),
+    Aleurodes = rbinom(lot_size, 1, proportions["Aleurodes"])
+  )
+}))
+
+# Affichage d'un aperçu des données
+head(dataset_examen_plants)
+```
+
+## Estimation de $P(p | X = x_{barre})$
+
+Oublions que l'on a simulé ces données. On se place maintenant dans la position d'un technicien qui reçoit tous ces lots, et qui cherche à déterminer **en examinant le moins de plants possibles** si la fréquence de présence de chaque insecte est supérieure ou inférieure à 1% ($p^{*} = 0.01$). Le technicien est honnête, il n'arretera pas les examens avant d'être sur à 95% de sa réponse ($\epsilon = 0.05$).
+
+A chaque nouveau plant examiné, le technicien dispose d'un nouvel estimateur de $X$ plus précis que le précédent, $x_{barre}$. A chaque nouveau plant examiné, on fera une estimation de $P(p | X = x_{barre})$ pour déterminer si $p$ est supérieure (resp. inférieure) au seuil critique que l'on s'est fixé, ou si l'examen d'un nouveau plant est nécessaire. Plus précisément on estimera $P(p > \epsilon | X = x_{barre})$ et de $P(p < \epsilon | X = x_{barre})$. Le technicien ne s'arrête d'examiner des plants que si l'une de ces deux probabilités est supérieure à 0.95, ou s'il n'y a plus de plants dans le lot.
+
+Rq: Choix des priors pour \alpha et \beta. Par défaut on démarre à (1,1) - cad que p suit une loi uniforme - puis on modifie à chaque test.
+
+Rq : Petit problème technique qui est que la beta est très sensible aux observations ce qui peut l'amener à formuler des conclusions trop tôt, sur de trop petits échantillons. Par exemple après 3 observations, si on a trouvé 1 insecte, la Beta peut déjà nous donner une probabilité supérieure à 0.95 pour p \> 5%. Cette sensibilité se stabilise avec l'augmentation du nombre d'observations. On décide donc de partir d'une taille d'échantillon minimale de 10 plants.
+
+*Définition de la fonction test_decision*
+
+La fonction test_decision() prend en entrée le nombre de plants examinés infestés et le nombre de plants examinés sains. Elle calcule la probabilité P que p soit supéieur au seuil seuil_p sachant ces deux nombres. Elle renvoie "Oui" si c'est le cas, "Non" si ça ne l'est pas, et "Indécis" si la probabilité P est comprise entre 0.05 et 0.95.
+
+```{r}
+test_decision <- function(N_plus, 
+                          N_moins, 
+                          seuil_p = 0.1, 
+                          epsilon = 0.05, 
+                          Nobs_min = 0) {
+  
+  # Vérifie si au moins un examen a été effectué
+  if (N_plus + N_moins <= Nobs_min) {
+    return("Imprécis")  # Pas de décision possible sans un nombre minimum d'examens Nobs_min
+  }
+  
+  # Calcul de la probabilité que p > seuil_p
+  P_sup <- 1 - pbeta(seuil_p, 1 + N_plus, 1 + N_moins)
+  
+  # Prendre une décision basée sur P_sup
+  if (P_sup > 1 - epsilon) {
+    return("Oui")  # Fréquence supérieure au seuil
+  } else if (P_sup < epsilon) {
+    return("Non")  # Fréquence inférieure au seuil
+  } else {
+    return("Indécis")  # Sinon, décision indécise
+  }
+}
+```
+
+## Visualisation des tests séquentiels
+
+Pour représenter graphiquement le test, on tracera un graphique avec en ordonnées le nombre de plant examinés infestés ($N_{+}$) et en abscisse le nombre de plants examinés saints ($N_{-}$). Sur ce graphique on représente en rouge la zone où $P(p > \epsilon | X = \frac{N_{+}}{N_{+} + N_{-}})$ \> 0.95 et en bleu $P(p < \epsilon | X = \frac{N_{+}}{N_{+} + N_{-}}) > 0.95$.
+
+Pour chaque lot, on trace l'exploration du technicien plant examiné par plant examiné. Dès qu'on arrive dans une zone rouge (rep. bleu) on peut arrêter l'examen des plants et conclure que la probabilité d'observer un insecte est supérieur (resp. inférieure) au seuil $\epsilon$.
+
+```{r}
+# Chargement des packages nécessaires
+library(shiny)
+library(ggplot2)
+
+# Définition des paramètres initiaux
+epsilon <- 0.05
+grid_size <- 100
+
+# Interface utilisateur
+ui <- fluidPage(
+  tags$style(HTML("
+  .thick-divider {
+    border-top: 5px solid #808080 !important;  /* Ligne grise épaisse */
+    margin-top: 20px;
+    margin-bottom: 20px;
+  }
+")),
+  tags$style(HTML("
+    #zoom .irs {
+      background: #008000 !important; /* Vert */
+      border-radius: 5px;
+    }
+  ")),
+  tags$style(
+    HTML("
+      .sidebar {
+        height: 100vh;
+        overflow-y: auto;
+      }
+    ")
+  ),
+  tags$style(
+  HTML("
+    .btn-primary {
+      background-color: #007BFF;  /* Bleu */
+      color: white;  /* Texte blanc */
+      border-color: #0056b3; /* Bordure légèrement plus foncée */
+    }
+    .btn-primary:hover {
+      background-color: #0056b3; /* Bleu plus foncé au survol */
+    }
+  ")
+),
+  sidebarLayout(
+    sidebarPanel(
+      class = "sidebar",  # Classe CSS personnalisée
+      div(
+  style = "background-color: wheat; border: 2px solid black; padding: 10px; 
+           border-radius: 5px; font-size: 16px; font-weight: bold; text-align: center;",
+  htmlOutput("status")
+),
+      br(), br(),
+      p("Cliquez sur les boutons ci-dessous pour indiquer le résutat de chaque examen : positif si un insecte a été trouvé sur le plant, négatif sinon. L'expérience interactive s'arrêtera automatiquement dès qu'une décision concernant l'infestation sera atteinte."),
+   br(),
+      fluidRow(
+  column(6, actionButton("positive", "Examen Positif (P)", class = "btn-primary")),
+  column(6, actionButton("negative", "Examen Négatif (N)", class = "btn-primary"))
+),
+      br(),
+      sliderInput("seuil_p", "Seuil critique (p*)", min = 0.01, max = 0.2, value = 0.1, step = 0.01),
+   sliderInput("epsilon", "Seuil de confiance (e)", min = 0.01, max = 0.1, value = 0.05, step = 0.01),
+      sliderInput("zoom", "Zoom (portion max des axes)", min = 10, max = grid_size, value = grid_size, step = 10),
+      br(),
+   div(
+  p(strong("Légende des zones :")),
+  div(style = "color: red; font-weight: bold;", "Infesté : P(p > p*) > 1 - e"),
+  div(style = "color: blue; font-weight: bold;", "Non Infesté : P(p > p*) < e"),
+  div(style = "color: gray; font-weight: bold;", "Indécis")
+),
+br(),
+      actionButton("reset", "Réinitialiser l'Expérience", class = "btn-primary"),
+    ),
+    mainPanel(
+      plotOutput("decision_plot", height = "450px", width = "100%"),
+      div(class = 'thick-divider'),
+      plotOutput("prob_distribution", height = "300px", width = "100%")
+    )
+  )
+)
+
+# Serveur de l'application
+server <- function(input, output, session) {
+  # Variables réactives pour suivre l'expérience
+  reactive_vals <- reactiveValues(
+    N_plus = 0, 
+    N_moins = 0, 
+    history = data.frame(N_moins = numeric(), N_plus = numeric()),
+    status = "Indécis",
+    decision_taken = FALSE
+  )
+
+  # Fonction pour calculer la probabilité P(p > seuil_p)
+  calc_prob <- function(N_plus, N_moins, seuil_p) {
+    if (N_plus + N_moins == 0) return(NA)
+    return(1 - pbeta(seuil_p, 1 + N_plus, 1 + N_moins))
+  }
+
+  # Fonction pour générer la distribution actuelle de p
+  output$prob_distribution <- renderPlot({
+    if (reactive_vals$N_plus + reactive_vals$N_moins == 0) return(NULL)
+    x <- seq(0, 1, length.out = 100)
+    y <- dbeta(x, 1 + reactive_vals$N_plus, 1 + reactive_vals$N_moins)
+    
+    ggplot(data.frame(x, y), aes(x = x, y = y)) +
+      geom_line(color = "black", size = 1) +
+      geom_vline(xintercept = input$seuil_p, color = "red", linetype = "dashed") +
+      labs(
+        title = "Distribution a posteriori de p",
+        x = "Probabilité p",
+        y = "Densité"
+      ) +
+      theme_minimal(base_size = 14) +
+      theme(
+  plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+  plot.subtitle = element_text(size = 14, hjust = 0.5),
+  axis.title = element_text(size = 14, face = "bold"), 
+  axis.text = element_text(size = 12),
+  legend.text = element_text(size = 12),
+  legend.title = element_text(size = 14)
+)
+  })
+
+  # Mise à jour des valeurs lorsque l'utilisateur clique sur "Positif" (P)
+  observeEvent(input$positive, {
+    if (!reactive_vals$decision_taken) {
+      reactive_vals$N_plus <- reactive_vals$N_plus + 1
+      reactive_vals$history <- rbind(reactive_vals$history, data.frame(
+        N_moins = reactive_vals$N_moins, 
+        N_plus = reactive_vals$N_plus
+      ))
+      update_graph()
+    }
+  })
+  
+  # Mise à jour des valeurs lorsque l'utilisateur clique sur "Négatif" (N)
+  observeEvent(input$negative, {
+    if (!reactive_vals$decision_taken) {
+      reactive_vals$N_moins <- reactive_vals$N_moins + 1
+      reactive_vals$history <- rbind(reactive_vals$history, data.frame(
+        N_moins = reactive_vals$N_moins, 
+        N_plus = reactive_vals$N_plus
+      ))
+      update_graph()
+    }
+  })
+  
+  # Réinitialiser l'expérience
+  observeEvent(input$reset, {
+    reactive_vals$N_plus <- 0
+    reactive_vals$N_moins <- 0
+    reactive_vals$history <- data.frame(N_moins = numeric(), N_plus = numeric())
+    reactive_vals$status <- "Indécis"
+    reactive_vals$decision_taken <- FALSE
+  })
+
+  # Mise à jour du graphique
+  output$decision_plot <- renderPlot({
+    # Création de la grille des décisions
+    grid <- expand.grid(
+      N_plus = 0:grid_size, 
+      N_moins = 0:grid_size
+    )
+    grid$Decision_Zone <- apply(grid, 1, function(row) {
+      test_decision(row[1], row[2], input$seuil_p, epsilon)
+    })
+    
+    # Tracé du graphique
+    ggplot(grid, aes(x = N_moins, y = N_plus)) +
+      geom_tile(aes(fill = Decision_Zone), alpha = 0.7, na.rm = TRUE, show.legend = FALSE) +  
+      scale_fill_manual(
+        values = c("Oui" = "red", "Non" = "blue", "Indécis" = "gray"),
+        labels = c("Oui" = "Oui (sur)", "Non" = "Non (sur)", "Indécis" = "Indécis"),
+        name = "Réponse"
+      ) +
+      geom_path(data = reactive_vals$history, aes(x = N_moins, y = N_plus), 
+                color = "black", size = 0.8, alpha = 0.6) +  
+      geom_point(aes(x = reactive_vals$N_moins, y = reactive_vals$N_plus), 
+                 color = "black", shape = 16, size = 4) +  
+      labs(
+        title = "Le lot est-il infesté ?",
+        subtitle = paste0("(N-, N+) : (", reactive_vals$N_moins, ", ", reactive_vals$N_plus, ")"),
+        x = "Nombre de plants sains (N-)",
+        y = "Nombre de plants infestés (N+)"
+      ) +
+      coord_cartesian(xlim = c(0, input$zoom), ylim = c(0, input$zoom / 10), expand = FALSE) +  
+      theme_minimal(base_size = 10) +
+      theme(
+  plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+  plot.subtitle = element_text(size = 14, hjust = 0.5),
+  axis.title = element_text(size = 14, face = "bold"), 
+  axis.text = element_text(size = 12),
+  legend.text = element_text(size = 12),
+  legend.title = element_text(size = 14)
+)
+  })
+
+  output$status <- renderText({
+  prob <- calc_prob(reactive_vals$N_plus, reactive_vals$N_moins, input$seuil_p)
+  total_examined <- reactive_vals$N_plus + reactive_vals$N_moins
+  
+  prob_text <- paste0("P(p > p*) = ", ifelse(is.na(prob), "NA", round(prob, 3)))
+  plants_text <- paste0("Nombre de plants examinés : ", total_examined)
+
+  if (reactive_vals$decision_taken) {
+    decision_color <- ifelse(reactive_vals$status == "Le lot est infesté", "red", "blue")
+    decision_text <- paste0("<b style='color:", decision_color, ";'>", reactive_vals$status, "</b>")
+  } else {
+    decision_text <- "<b style='color:black;'>Indécis</b>"
+  }
+  
+  HTML(paste(plants_text, prob_text, decision_text, sep = "<br>"))
+})
+
+  # Fonction pour mettre à jour l'état de l'expérience
+  update_graph <- function() {
+    decision <- test_decision(reactive_vals$N_plus, reactive_vals$N_moins, input$seuil_p, epsilon)
+    if (decision != "Indécis") {
+      reactive_vals$status <- ifelse(decision == "Oui", "Le lot est infesté", "Le lot n'est pas infesté")
+      reactive_vals$decision_taken <- TRUE
+    }
+  }
+}
+
+# Exécuter l'application
+shinyApp(ui, server)
+```
+
+## Résultats des examens sur les données simulées
+
+Reste à harmoniser la figure.
+
+```{r}
+# Définition des paramètres
+grid_size <- 100  # Nombre max de plants examinés
+seuil_p <- 0.05
+Taxon <- dataset_examen_plants$Thrips
+
+# Création d'une grille de valeurs pour (N+, N-)
+grid <- expand.grid(
+  N_plus = 0:grid_size,   # Nombre de plants infestés examinés
+  N_moins = 0:grid_size   # Nombre de plants sains examinés
+) %>%
+  rowwise() %>%
+  mutate(
+    P_sup = 1 - pbeta(seuil_p, 1 + N_plus, 1 + N_moins),  # P(p > seuil_p)
+    Decision_Zone = case_when(
+      P_sup > 1 - epsilon ~ "Fréquence supérieure",
+      P_sup < epsilon ~ "Fréquence inférieure",
+      TRUE ~ "Indécis"
+    )
+  ) %>%
+  ungroup()
+
+# Calcul des trajectoires pour chaque lot
+trajectories <- dataset_examen_plants %>%
+  group_by(Lot_ID) %>%
+  arrange(Plant_ID) %>%
+  mutate(
+    N_plus = cumsum(Thrips),  # Nombre de plants infestés cumulés
+    N_moins = cumsum(1 - Thrips),  # Nombre de plants sains cumulés
+    Total_examined = N_plus + N_moins  # Nombre total de plants examinés
+  ) %>%
+  left_join(grid, by = c("N_plus", "N_moins")) %>%
+  group_by(Lot_ID) %>%
+  mutate(Decision_Reached = Decision_Zone %in% c("Fréquence supérieure", "Fréquence inférieure")) %>%
+  filter(
+    row_number() == n() |  # Toujours garder le dernier point du lot
+    (Decision_Reached & row_number() == min(which(Decision_Reached), na.rm = TRUE))
+  ) %>%
+  slice_head(n = 1) %>%  # Garde un seul point par lot
+  ungroup()
+
+# Tracé du graphique avec correction pour n'afficher qu'un seul '+' par lot
+ggplot(grid, aes(x = N_moins, y = N_plus)) +
+  geom_tile(aes(fill = Decision_Zone), alpha = 0.7, na.rm = TRUE) +  
+  scale_fill_manual(
+    values = c("Fréquence supérieure" = "red", 
+               "Fréquence inférieure" = "blue", 
+               "Indécis" = "gray"),
+    labels = c("Fréquence supérieure" = "Oui", 
+               "Fréquence inférieure" = "Non", 
+               "Indécis" = "Indécis"),
+    name = "Réponse"
+  ) +
+  geom_point(data = trajectories, aes(x = N_moins, y = N_plus, color = as.factor(Lot_ID)), 
+             size = 2, shape = 3, stroke = 1.5) +  # Un seul point par lot sous forme de '+'
+  scale_color_viridis_d(name = "Lots", guide = guide_legend(ncol = 2)) +  # Légende en 2 colonnes
+  scale_y_continuous(breaks = seq(0, grid_size/10, by = 2)) +  
+  labs(
+    title = "A-t-on dépassé le seuil critique p* ?",
+    subtitle = "Une réponse pour chaque lot",
+    x = "Nombre de plants sains examinés (N-)",
+    y = "Nombre de plants infestés examinés (N+)"
+  ) +
+  coord_cartesian(xlim = c(0, grid_size), ylim = c(0, grid_size/10), expand = FALSE) +  # Zoom sur N_plus
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid = element_blank(),  # Suppression des lignes grises de fond
+    axis.line = element_line(color = "black"),  # Axes X et Y en noir
+    plot.title = element_text(hjust = 0.5, face = "bold"),  # Titre centré et en gras
+    plot.subtitle = element_text(hjust = 0.5)  # Sous-titre centré
+  )
+```
+
+*Résultats sous forme de tableau pour l'ensemble des lots*
+
+```{r}
+# Création du tableau récapitulatif
+summary_results <- data.frame(
+  Lot_ID = integer(),
+  Lot_Size = integer(),
+  N_examined_Pucerons = integer(),
+  Decision_Pucerons = character(),
+  N_examined_Thrips = integer(),
+  Decision_Thrips = character(),
+  N_examined_Aleurodes = integer(),
+  Decision_Aleurodes = character(),
+  stringsAsFactors = FALSE
+)
+
+for (i in 1:nb_lots) {
+  
+  # Récupérer le lot i
+  df_lot <- dataset_examen_plants %>% filter(Lot_ID == i)
+  
+  # Calculer le nombre total de positifs et négatifs pour chaque insecte
+  N_plus_pucerons <- sum(df_lot$Pucerons)
+  N_moins_pucerons <- nrow(df_lot) - N_plus_pucerons
+  N_plus_thrips <- sum(df_lot$Thrips)
+  N_moins_thrips <- nrow(df_lot) - N_plus_thrips
+  N_plus_aleurodes <- sum(df_lot$Aleurodes)
+  N_moins_aleurodes <- nrow(df_lot) - N_plus_aleurodes
+  
+  # Appliquer la fonction de décision pour chaque insecte
+  decision_pucerons <- test_decision(N_plus_pucerons, N_moins_pucerons, seuil_p, epsilon)
+  decision_thrips <- test_decision(N_plus_thrips, N_moins_thrips, seuil_p, epsilon)
+  decision_aleurodes <- test_decision(N_plus_aleurodes, N_moins_aleurodes, seuil_p, epsilon)
+  
+  # Stocker les résultats dans le tableau récapitulatif
+  summary_results <- rbind(summary_results, data.frame(
+    Lot_ID = df_lot$Lot_ID[1],
+    Lot_Size = nrow(df_lot),
+    N_examined_Pucerons = N_plus_pucerons + N_moins_pucerons,
+    Decision_Pucerons = decision_pucerons,
+    N_examined_Thrips = N_plus_thrips + N_moins_thrips,
+    Decision_Thrips = decision_thrips,
+    N_examined_Aleurodes = N_plus_aleurodes + N_moins_aleurodes,
+    Decision_Aleurodes = decision_aleurodes
+  ))
+}
+
+# Affichage du tableau mis à jour
+print(summary_results)
+```
+
+*Analyse des incertitudes associées à la méthode*
+
+Fabrique une fonction qui donne le nombre de vrai positifs, vrai négatifs, fau positifs et faux négatifs dans les réponse données par la méthode. Donne également le nombre de plants dont la méthode permet d'éviter l'examen.
+
+```{r}
+# Définition des paramètres
+set.seed(123)
+nb_simulations <- 100  # Nombre de simulations par fréquence
+lot_size <- 100         # Taille des lots simulés
+seuil_p <- 0.05        # Seuil critique du test
+epsilon <- 0.05        # Niveau de confiance
+frequences_reelles <- seq(0, 0.2, by = 0.01)  # Valeurs de p réelles testées
+
+# Fonction pour simuler un lot et appliquer le test
+simuler_et_tester <- function(p_reel) {
+  observations <- rbinom(lot_size, 1, p_reel)  # Simulation de présence/absence
+  N_plus <- sum(observations)  # Nombre de plants infestés
+  N_moins <- lot_size - N_plus  # Nombre de plants sains
+  
+  # Application du test
+  decision <- test_decision(N_plus, N_moins, seuil_p, epsilon)
+  
+  # Évaluation de l'erreur
+  erreur_type_1 <- (decision == "Oui" & p_reel < seuil_p)  # Faux positif
+  erreur_type_2 <- (decision == "Non" & p_reel > seuil_p)  # Faux négatif
+  indécis <- (decision == "Indécis")
+  
+  return(c(erreur_type_1, erreur_type_2, indécis))
+}
+
+# Simulation pour chaque fréquence réelle
+resultats <- lapply(frequences_reelles, function(p_reel) {
+  simulations <- replicate(nb_simulations, simuler_et_tester(p_reel))
+  taux_faux_positifs <- mean(simulations[1, ])  # Proportion de faux positifs
+  taux_faux_négatifs <- mean(simulations[2, ])  # Proportion de faux négatifs
+  taux_indécision <- mean(simulations[3, ])  # Proportion d'indécisions
+  
+  return(data.frame(
+    Frequence_reele = p_reel,
+    Faux_Positifs = taux_faux_positifs,
+    Faux_Negatifs = taux_faux_négatifs,
+    Indecision = taux_indécision
+  ))
+})
+
+# Création du tableau final
+tableau_erreurs <- do.call(rbind, resultats)
+
+print(tableau_erreurs)
+```
